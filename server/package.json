@@ -1,0 +1,27 @@
+{
+  "name": "@battleprompt/game-server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/game-runtime.d.ts",
+      "default": "./dist/game-runtime.js"
+    }
+  },
+  "scripts": {
+    "build": "pnpm --filter @battleprompt/contracts build && pnpm --filter @battleprompt/game-shared build && tsc -p tsconfig.json",
+    "check": "pnpm --filter @battleprompt/contracts build && pnpm --filter @battleprompt/game-shared build && tsc -p tsconfig.json --noEmit",
+    "dev": "tsc -p tsconfig.json --watch --preserveWatchOutput"
+  },
+  "dependencies": {
+    "@battleprompt/contracts": "workspace:*",
+    "@battleprompt/game-shared": "workspace:*",
+    "ws": "8.21.3",
+    "zod": "4.5.4"
+  },
+  "devDependencies": {
+    "@types/node": "24.13.3",
+    "@types/ws": "8.18.1"
+  }
+}

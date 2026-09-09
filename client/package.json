@@ -1,0 +1,16 @@
+{
+  "name": "@battleprompt/game-client",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "pnpm --filter @battleprompt/game-shared build && tsc --noEmit && vite build",
+    "check": "pnpm --filter @battleprompt/game-shared build && tsc --noEmit",
+    "dev": "vite --host 0.0.0.0 --port 5174 --strictPort"
+  },
+  "dependencies": {
+    "@babylonjs/core": "9.25.0",
+    "@battleprompt/game-shared": "workspace:*"
+  },
+  "devDependencies": { "typescript": "7.0.2", "vite": "8.2.2" }
+}
