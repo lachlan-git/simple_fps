@@ -1,0 +1,19 @@
+{
+  "name": "battleprompt-game",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@12.3.4",
+  "engines": {
+    "node": "24.19.0",
+    "pnpm": "12.3.4"
+  },
+  "scripts": {
+    "build": "pnpm --filter @battleprompt/game-client build",
+    "check": "pnpm --filter @battleprompt/game-client check && PYTHONPATH=. ../.venv/bin/python -m pytest -q server/python_tests",
+    "start": "python -m server.battleprompt_game.main"
+  },
+  "devDependencies": {
+    "typescript": "7.0.2"
+  }
+}

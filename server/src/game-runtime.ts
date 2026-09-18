@@ -1,11 +1,27 @@
 import type { WebSocket } from "ws";
 import { z } from "zod";
 
-import type { PlayerId, RoomConfig } from "@battleprompt/contracts";
-import { collidesWithArena, raycastArena, raycastPlayer } from "@battleprompt/game-shared";
+import { PLAYER_EYE_HEIGHT, collidesWithArena, raycastArena, raycastPlayer } from "@battleprompt/game-shared";
+
+type PlayerId = string;
+
+export interface RoomConfig {
+  readonly maxPlayers: number;
+  readonly warmupSeconds: number;
+  readonly roundSeconds: number;
+  readonly finalVoteSeconds: number;
+  readonly activationSeconds: number;
+  readonly candidateWaitSeconds: number;
+  readonly respawnSeconds: number;
+  readonly startingHealth: number;
+  readonly weaponDamage: number;
+  readonly maxPointsPerCall: number;
+}
 
 const SIMULATION_HZ = 60;
 const PLAYER_SPEED = 6;
+const JUMP_SPEED = 7.5;
+const GRAVITY = 20;
 
 const InputMessageSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("authenticate"), token: z.string().min(32).max(2048) }).strict(),
@@ -13,6 +29,7 @@ const InputMessageSchema = z.discriminatedUnion("type", [
     type: z.literal("input"),
     forward: z.number().min(-1).max(1),
     strafe: z.number().min(-1).max(1),
+    jump: z.boolean(),
     yaw: z.number().finite(),
     pitch: z.number().finite().min(-1.5).max(1.5),
   }).strict(),
@@ -36,6 +53,8 @@ interface RuntimePlayer {
   respawnAtMs: number | null;
   forward: number;
   strafe: number;
+  jumpQueued: boolean;
+  verticalVelocity: number;
   lastShotAtMs: number;
   messageWindowStartedAtMs: number;
   messagesInWindow: number;
@@ -48,13 +67,13 @@ interface GameRoom {
   tick: number;
 }
 
-interface ControlPlanePlayer {
+export interface ControlPlanePlayer {
   readonly id: PlayerId;
   readonly displayName: string;
   readonly points: number;
 }
 
-interface ControlPlaneRoom {
+export interface ControlPlaneRoom {
   readonly state: {
     readonly config: RoomConfig;
     readonly phase: string;
@@ -64,9 +83,10 @@ interface ControlPlaneRoom {
 }
 
 export interface GameControlPlane {
-  authenticatePlayer(code: string, token: string): ControlPlanePlayer;
+  authenticatePlayer(code: string, token: string): ControlPlanePlayer | Promise<ControlPlanePlayer>;
   getRoom(code: string, nowMs?: number): ControlPlaneRoom;
   addPoints(code: string, playerId: string, points: number, nowMs?: number): unknown;
+  close?(): void;
 }
 
 export class GameRuntime {
@@ -81,6 +101,7 @@ export class GameRuntime {
   public accept(socket: WebSocket, codeInput: string): void {
     const code = codeInput.trim().toUpperCase();
     let player: RuntimePlayer | undefined;
+    let authenticationInProgress = false;
     const authenticationTimeout = setTimeout(() => socket.close(4401, "Authentication required"), 5_000);
     authenticationTimeout.unref();
 
@@ -104,29 +125,30 @@ export class GameRuntime {
       }
 
       if (player === undefined) {
-        if (input.type !== "authenticate") {
+        if (input.type !== "authenticate" || authenticationInProgress) {
           socket.close(4401, "Authentication required");
           return;
         }
-        try {
-          const identity = this.controlPlane.authenticatePlayer(code, input.token);
-          const roomSnapshot = this.controlPlane.getRoom(code);
-          const room = this.#rooms.get(code) ?? {
-            code,
-            players: new Map(),
-            config: roomSnapshot.state.config,
-            tick: 0,
-          };
-          room.config = roomSnapshot.state.config;
-          this.#rooms.set(code, room);
-          room.players.get(identity.id)?.socket.close(4409, "Connected elsewhere");
-          player = createRuntimePlayer(identity, socket, room.config, room.players.size);
-          room.players.set(identity.id, player);
-          clearTimeout(authenticationTimeout);
-          send(socket, { type: "authenticated", playerId: identity.id, config: room.config });
-        } catch {
-          socket.close(4401, "Invalid player credentials");
-        }
+        authenticationInProgress = true;
+        void Promise.resolve(this.controlPlane.authenticatePlayer(code, input.token))
+          .then((identity) => {
+            const roomSnapshot = this.controlPlane.getRoom(code);
+            const room = this.#rooms.get(code) ?? {
+              code,
+              players: new Map(),
+              config: roomSnapshot.state.config,
+              tick: 0,
+            };
+            room.config = roomSnapshot.state.config;
+            this.#rooms.set(code, room);
+            room.players.get(identity.id)?.socket.close(4409, "Connected elsewhere");
+            player = createRuntimePlayer(identity, socket, room.config, room.players.size);
+            room.players.set(identity.id, player);
+            clearTimeout(authenticationTimeout);
+            send(socket, { type: "authenticated", playerId: identity.id, config: room.config });
+          })
+          .catch(() => socket.close(4401, "Invalid player credentials"))
+          .finally(() => { authenticationInProgress = false; });
         return;
       }
 
@@ -137,6 +159,7 @@ export class GameRuntime {
       if (input.type === "input") {
         player.forward = input.forward;
         player.strafe = input.strafe;
+        if (input.jump) player.jumpQueued = true;
         player.yaw = normalizeAngle(input.yaw);
         player.pitch = input.pitch;
       } else if (input.type === "shoot") {
@@ -154,6 +177,7 @@ export class GameRuntime {
 
   public close(): void {
     clearInterval(this.#interval);
+    this.controlPlane.close?.();
     for (const room of this.#rooms.values()) {
       for (const player of room.players.values()) {
         player.socket.close(1001, "Server shutting down");
@@ -169,12 +193,14 @@ export class GameRuntime {
           if (nowMs >= player.respawnAtMs) {
             const spawn = spawnPoint(room.players.size + room.tick);
             player.x = spawn.x;
-            player.y = 1.7;
+            player.y = PLAYER_EYE_HEIGHT;
             player.z = spawn.z;
             player.yaw = Math.atan2(-spawn.x, -spawn.z);
             player.pitch = 0;
             player.health = room.config.startingHealth;
             player.respawnAtMs = null;
+            player.jumpQueued = false;
+            player.verticalVelocity = 0;
           }
           continue;
         }
@@ -193,6 +219,16 @@ export class GameRuntime {
         }
         if (!collidesWithArena(player.x, nextZ)) {
           player.z = nextZ;
+        }
+        if (player.jumpQueued && player.y <= PLAYER_EYE_HEIGHT) {
+          player.verticalVelocity = JUMP_SPEED;
+        }
+        player.jumpQueued = false;
+        player.verticalVelocity -= GRAVITY / SIMULATION_HZ;
+        player.y += player.verticalVelocity / SIMULATION_HZ;
+        if (player.y <= PLAYER_EYE_HEIGHT) {
+          player.y = PLAYER_EYE_HEIGHT;
+          player.verticalVelocity = 0;
         }
       }
 
@@ -278,9 +314,7 @@ export class GameRuntime {
 
     if (target !== undefined && eliminated) {
       target.respawnAtMs = nowMs + room.config.respawnSeconds * 1_000;
-      try {
-        this.controlPlane.addPoints(code, attacker.id, 1, nowMs);
-      } catch {}
+      void Promise.resolve(this.controlPlane.addPoints(code, attacker.id, 1, nowMs)).catch(() => undefined);
     }
   }
 
@@ -306,7 +340,7 @@ function createRuntimePlayer(
     displayName: identity.displayName,
     socket,
     x: spawn.x,
-    y: 1.7,
+    y: PLAYER_EYE_HEIGHT,
     z: spawn.z,
     yaw: Math.atan2(-spawn.x, -spawn.z),
     pitch: 0,
@@ -314,6 +348,8 @@ function createRuntimePlayer(
     respawnAtMs: null,
     forward: 0,
     strafe: 0,
+    jumpQueued: false,
+    verticalVelocity: 0,
     lastShotAtMs: 0,
     messageWindowStartedAtMs: Date.now(),
     messagesInWindow: 0,

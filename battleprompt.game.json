@@ -1,0 +1,22 @@
+{
+  "contractVersion": 1,
+  "commands": {
+    "install": {
+      "executable": "pnpm",
+      "arguments": ["install", "--frozen-lockfile"]
+    },
+    "build": {
+      "executable": "pnpm",
+      "arguments": ["build"]
+    },
+    "start": {
+      "executable": "python3",
+      "arguments": ["-m", "server.battleprompt_game.main"]
+    }
+  },
+  "runtime": {
+    "clientPath": "/",
+    "websocketPath": "/ws/game/{roomCode}",
+    "readyPath": "/health/ready"
+  }
+}

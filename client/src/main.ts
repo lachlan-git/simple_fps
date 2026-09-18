@@ -10,7 +10,7 @@ import {
   UniversalCamera,
   Vector3,
 } from "@babylonjs/core";
-import { ARENA_OBSTACLES, collidesWithArena } from "@battleprompt/game-shared";
+import { ARENA_OBSTACLES, PLAYER_EYE_HEIGHT, collidesWithArena } from "@battleprompt/game-shared";
 
 import "./styles.css";
 
@@ -58,7 +58,7 @@ interface Particle {
 }
 
 const parentOrigin = import.meta.env.VITE_CONTROL_ORIGIN ?? "http://localhost:5173";
-const apiOrigin = import.meta.env.VITE_API_ORIGIN ?? "http://localhost:3000";
+const apiOrigin = import.meta.env.VITE_API_ORIGIN ?? location.origin;
 const INPUT_HZ = 60;
 const roomCode = new URLSearchParams(location.search).get("room");
 const canvas = document.querySelector<HTMLCanvasElement>("#game")!;
@@ -150,6 +150,7 @@ let renderFrames = 0;
 let receivedSnapshots = 0;
 let receivedShots = 0;
 let confirmedHits = 0;
+let jumpQueued = false;
 
 window.addEventListener("message", (event) => {
   if (
@@ -157,16 +158,23 @@ window.addEventListener("message", (event) => {
     || event.source !== window.parent
     || event.data?.type !== "battleprompt.initialize"
     || event.data.roomCode !== roomCode
-    || typeof event.data.playerToken !== "string"
+    || typeof event.data.gameToken !== "string"
   ) return;
-  connect(event.data.playerToken);
+  connect(event.data.gameToken);
 });
 window.parent.postMessage({ type: "game.loaded" }, parentOrigin);
 
-window.addEventListener("keydown", (event) => keys.add(event.code));
+window.addEventListener("keydown", (event) => {
+  keys.add(event.code);
+  if (event.code === "Space") {
+    event.preventDefault();
+    if (!event.repeat) jumpQueued = true;
+  }
+});
 window.addEventListener("keyup", (event) => keys.delete(event.code));
 window.addEventListener("blur", () => {
   keys.clear();
+  jumpQueued = false;
   firing = false;
 });
 canvas.addEventListener("mousedown", (event) => {
@@ -202,9 +210,11 @@ window.setInterval(() => {
     type: "input",
     forward: Number(keys.has("KeyW")) - Number(keys.has("KeyS")),
     strafe: Number(keys.has("KeyD")) - Number(keys.has("KeyA")),
+    jump: jumpQueued,
     yaw,
     pitch,
   }));
+  jumpQueued = false;
 }, 1000 / INPUT_HZ);
 
 function connect(token: string): void {
@@ -254,10 +264,10 @@ function connect(token: string): void {
       let avatar = avatars.get(state.id);
       if (avatar === undefined) {
         avatar = createAvatar(state.id);
-        avatar.root.position.set(state.x, 0, state.z);
+        avatar.root.position.set(state.x, state.y - PLAYER_EYE_HEIGHT, state.z);
         avatars.set(state.id, avatar);
       }
-      avatar.targetPosition.set(state.x, 0, state.z);
+      avatar.targetPosition.set(state.x, state.y - PLAYER_EYE_HEIGHT, state.z);
       avatar.targetYaw = state.yaw;
       avatar.root.setEnabled(state.respawnAtMs === null);
     }
@@ -521,6 +531,7 @@ engine.runRenderLoop(() => {
   renderFrames += 1;
   canvas.dataset.renderFrames = String(renderFrames);
   canvas.dataset.cameraX = camera.position.x.toFixed(3);
+  canvas.dataset.cameraY = camera.position.y.toFixed(3);
   canvas.dataset.cameraZ = camera.position.z.toFixed(3);
   canvas.dataset.cameraYaw = yaw.toFixed(3);
   canvas.dataset.cameraPitch = pitch.toFixed(3);
