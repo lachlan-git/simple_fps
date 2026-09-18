@@ -11,20 +11,9 @@ import {
   Vector3,
 } from "@babylonjs/core";
 import { ARENA_OBSTACLES, PLAYER_EYE_HEIGHT, collidesWithArena } from "@battleprompt/game-shared";
+import { createClientFeatures, type PlayerState, type SnapshotMessage } from "./feature-api";
 
 import "./styles.css";
-
-interface PlayerState {
-  readonly id: string;
-  readonly displayName: string;
-  readonly x: number;
-  readonly y: number;
-  readonly z: number;
-  readonly yaw: number;
-  readonly pitch: number;
-  readonly health: number;
-  readonly respawnAtMs: number | null;
-}
 
 interface ShotMessage {
   readonly type: "shot";
@@ -71,6 +60,7 @@ const engine = new Engine(canvas, true, { preserveDrawingBuffer: false, stencil:
 const scene = new Scene(engine);
 scene.clearColor.set(0.055, 0.075, 0.066, 1);
 scene.skipPointerMovePicking = true;
+const gameFeatures = createClientFeatures(scene);
 
 const camera = new UniversalCamera("player-camera", new Vector3(0, 1.7, -18), scene);
 camera.minZ = 0.05;
@@ -139,6 +129,7 @@ let yaw = 0;
 let pitch = 0;
 let health = 100;
 let respawnAtMs: number | null = null;
+let localPlayerState: PlayerState | null = null;
 let hasServerPosition = false;
 let latestSnapshotAt = performance.now();
 let firing = false;
@@ -235,11 +226,14 @@ function connect(token: string): void {
       return;
     }
     if (message.type !== "snapshot" || !Array.isArray(message.players)) return;
+    const snapshot = message as SnapshotMessage;
+    localPlayerState = snapshot.players.find((state) => state.id === playerId) ?? null;
+    for (const feature of gameFeatures) feature.update(snapshot, localPlayerState);
     receivedSnapshots += 1;
     canvas.dataset.snapshots = String(receivedSnapshots);
     latestSnapshotAt = performance.now();
     const seen = new Set<string>();
-    for (const state of message.players as PlayerState[]) {
+    for (const state of snapshot.players) {
       playerNames.set(state.id, state.displayName);
       if (state.id === playerId) {
         serverPosition.set(state.x, state.y, state.z);
@@ -253,8 +247,12 @@ function connect(token: string): void {
           camera.rotation.set(pitch, yaw, 0);
           hasServerPosition = true;
         }
+        const featureStatus = gameFeatures
+          .map((feature) => feature.playerStatus?.(state))
+          .filter((value): value is string => typeof value === "string" && value.length > 0)
+          .join(" · ");
         status.textContent = respawnAtMs === null
-          ? `${health} HP${message.phase === "WARMUP" ? " · UNSCORED" : ""}`
+          ? `${health} HP${featureStatus ? ` · ${featureStatus}` : ""}${snapshot.phase === "WARMUP" ? " · UNSCORED" : ""}`
           : `RESPAWNING ${Math.max(1, Math.ceil((respawnAtMs - Date.now()) / 1000))}`;
         weaponRoot.setEnabled(respawnAtMs === null);
         continue;
@@ -344,8 +342,14 @@ function limb(
 }
 
 function tryShoot(nowMs: number): void {
-  if (socket?.readyState !== WebSocket.OPEN || respawnAtMs !== null || nowMs - lastLocalShotAt < 250) return;
+  if (
+    socket?.readyState !== WebSocket.OPEN
+    || respawnAtMs !== null
+    || nowMs - lastLocalShotAt < 250
+    || !gameFeatures.every((feature) => feature.canShoot?.(localPlayerState) ?? true)
+  ) return;
   lastLocalShotAt = nowMs;
+  for (const feature of gameFeatures) feature.onLocalShot?.();
   muzzleUntil = nowMs + 65;
   recoil = 1;
   socket.send(JSON.stringify({ type: "shoot", yaw, pitch }));
@@ -522,6 +526,7 @@ engine.runRenderLoop(() => {
   updateLocalPlayer(deltaSeconds, nowMs);
   updateAvatars(deltaSeconds, nowMs);
   updateParticles(deltaSeconds, nowMs);
+  for (const feature of gameFeatures) feature.render?.(deltaSeconds, nowMs);
   recoil += (0 - recoil) * (1 - Math.exp(-18 * deltaSeconds));
   weaponRoot.position.y = -0.28 + recoil * 0.045;
   weaponRoot.position.z = 0.72 - recoil * 0.1;

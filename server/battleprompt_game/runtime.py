@@ -13,6 +13,7 @@ from typing_extensions import Annotated, Literal
 
 from .arena import PLAYER_EYE_HEIGHT, collides_with_arena, raycast_arena, raycast_player
 from .control_plane import ControlPlane
+from .feature_api import GameFeature, load_features
 
 SIMULATION_HZ = 60
 PLAYER_SPEED = 6
@@ -58,6 +59,7 @@ class RuntimePlayer:
     yaw: float
     pitch: float
     health: int
+    feature_state: dict[str, Any] = field(default_factory=dict)
     respawn_at_ms: int | None = None
     forward: float = 0
     strafe: float = 0
@@ -73,6 +75,7 @@ class GameRoom:
     code: str
     config: dict[str, Any]
     players: dict[str, RuntimePlayer] = field(default_factory=dict)
+    feature_state: dict[str, Any] = field(default_factory=dict)
     tick: int = 0
 
 
@@ -80,6 +83,7 @@ class GameRuntime:
     def __init__(self, control_plane: ControlPlane) -> None:
         self.control_plane = control_plane
         self.rooms: dict[str, GameRoom] = {}
+        self.features = load_features()
         self._simulation_task: asyncio.Task[None] | None = None
 
     async def start(self) -> None:
@@ -104,6 +108,8 @@ class GameRuntime:
             if previous is not None:
                 await previous.socket.close(4409, "Connected elsewhere")
             player = _create_player(identity, socket, room.config, len(room.players))
+            for feature in self.features:
+                feature.on_player_created(player)
             room.players[player.id] = player
             await socket.send_json({"type": "authenticated", "playerId": player.id, "config": room.config})
 
@@ -163,6 +169,8 @@ class GameRuntime:
                         player.yaw = math.atan2(-spawn[0], -spawn[1])
                         player.pitch = 0
                         player.health = room.config["startingHealth"]
+                        for feature in self.features:
+                            feature.on_player_respawn(player)
                         player.respawn_at_ms = None
                         player.jump_queued = False
                         player.vertical_velocity = 0
@@ -185,18 +193,28 @@ class GameRuntime:
                 if player.y <= PLAYER_EYE_HEIGHT:
                     player.y = PLAYER_EYE_HEIGHT
                     player.vertical_velocity = 0
+            for feature in self.features:
+                feature.simulate(room, now_ms)
             snapshot = self.control_plane.get_room(room.code)
+            feature_snapshot = _room_feature_snapshot(room, self.features)
             await self._broadcast(room, {
                 "type": "snapshot", "tick": room.tick,
                 "phase": snapshot["state"]["phase"], "deadlineMs": snapshot["state"]["deadlineMs"],
                 "scores": snapshot["players"],
-                "players": [_public_runtime_player(item) for item in room.players.values()],
+                "players": [_public_runtime_player(item, self.features) for item in room.players.values()],
+                "features": feature_snapshot,
             })
 
     async def _shoot(self, room: GameRoom, attacker: RuntimePlayer, yaw: float, pitch: float, now_ms: int) -> None:
-        if attacker.respawn_at_ms is not None or now_ms - attacker.last_shot_at_ms < 250:
+        if (
+            attacker.respawn_at_ms is not None
+            or now_ms - attacker.last_shot_at_ms < 250
+            or not all(feature.can_shoot(attacker, now_ms) for feature in self.features)
+        ):
             return
         attacker.last_shot_at_ms = now_ms
+        for feature in self.features:
+            feature.on_shot(attacker)
         direction = {
             "x": math.sin(yaw) * math.cos(pitch),
             "y": -math.sin(pitch),
@@ -227,6 +245,8 @@ class GameRuntime:
         })
         if target is not None and eliminated:
             target.respawn_at_ms = now_ms + room.config["respawnSeconds"] * 1_000
+            for feature in self.features:
+                feature.on_elimination(room, attacker, target, now_ms)
             asyncio.create_task(self.control_plane.add_points(room.code, attacker.id, 1))
 
     async def _broadcast(self, room: GameRoom, message: dict[str, Any]) -> None:
@@ -267,10 +287,25 @@ def _spawn_point(index: int) -> tuple[int, int]:
     return points[index % len(points)]
 
 
-def _public_runtime_player(player: RuntimePlayer) -> dict[str, Any]:
+def _public_runtime_player(player: RuntimePlayer, features: tuple[GameFeature, ...]) -> dict[str, Any]:
     return {
         "id": player.id, "displayName": player.display_name,
         "x": player.x, "y": player.y, "z": player.z,
         "yaw": player.yaw, "pitch": player.pitch,
         "health": player.health, "respawnAtMs": player.respawn_at_ms,
+        "features": _player_feature_snapshot(player, features),
     }
+
+
+def _room_feature_snapshot(room: GameRoom, features: tuple[GameFeature, ...]) -> dict[str, Any]:
+    snapshot = {}
+    for feature in features:
+        snapshot.update(feature.room_snapshot(room))
+    return snapshot
+
+
+def _player_feature_snapshot(player: RuntimePlayer, features: tuple[GameFeature, ...]) -> dict[str, Any]:
+    snapshot = {}
+    for feature in features:
+        snapshot.update(feature.player_snapshot(player))
+    return snapshot

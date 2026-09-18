@@ -1,0 +1,1 @@
+"""Optional game feature plugins."""
